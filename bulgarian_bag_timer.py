@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Bulgarian Bag interval timer — Pomodoro-style work/rest round timer for macOS."""
 
+import json
 import math
 import subprocess
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk
 
 BG = "#1c1c1e"
@@ -26,6 +28,39 @@ RING_WIDTH = 14
 
 FLASH_FRAMES = 6
 FLASH_FRAME_MS = 45
+
+CONFIG_PATH = Path.home() / "Library" / "Application Support" / "BulgarianBagTimer" / "settings.json"
+SAVE_DEBOUNCE_MS = 400
+
+DEFAULT_SETTINGS = {
+    "work_seconds": 30,
+    "rest_seconds": 30,
+    "rounds": 10,
+    "skip_last_rest": True,
+}
+
+
+def load_settings() -> dict:
+    settings = dict(DEFAULT_SETTINGS)
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            saved = json.load(f)
+        settings["work_seconds"] = max(0, min(60, int(saved.get("work_seconds", settings["work_seconds"]))))
+        settings["rest_seconds"] = max(0, min(60, int(saved.get("rest_seconds", settings["rest_seconds"]))))
+        settings["rounds"] = max(1, min(60, int(saved.get("rounds", settings["rounds"]))))
+        settings["skip_last_rest"] = bool(saved.get("skip_last_rest", settings["skip_last_rest"]))
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError, OSError):
+        pass
+    return settings
+
+
+def save_settings(settings: dict) -> None:
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(settings, f)
+    except OSError:
+        pass
 
 
 def play_sound(path: str) -> None:
@@ -190,9 +225,31 @@ class BulgarianBagTimer(tk.Tk):
         self.running = False
         self.timer_job = None
         self.flash_job = None
+        self.save_job = None
+
+        self.saved_settings = load_settings()
 
         self._build_ui()
         self._reset_all()
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        self._save_settings_now()
+        self.destroy()
+
+    def _save_settings_now(self):
+        save_settings({
+            "work_seconds": self.work_dial.value,
+            "rest_seconds": self.rest_dial.value,
+            "rounds": self.rounds_dial.value,
+            "skip_last_rest": self.skip_last_rest_var.get(),
+        })
+
+    def _schedule_save(self):
+        if self.save_job is not None:
+            self.after_cancel(self.save_job)
+        self.save_job = self.after(SAVE_DEBOUNCE_MS, self._save_settings_now)
 
     # ---------- UI ----------
 
@@ -222,17 +279,20 @@ class BulgarianBagTimer(tk.Tk):
         settings.pack(pady=(0, 18))
 
         self.work_dial = Dial(
-            settings, "운동", minimum=0, maximum=60, value=30, unit="초", accent=WORK_COLOR
+            settings, "운동", minimum=0, maximum=60,
+            value=self.saved_settings["work_seconds"], unit="초", accent=WORK_COLOR,
         )
         self.work_dial.grid(row=0, column=0, padx=14)
 
         self.rest_dial = Dial(
-            settings, "휴식", minimum=0, maximum=60, value=15, unit="초", accent=REST_COLOR
+            settings, "휴식", minimum=0, maximum=60,
+            value=self.saved_settings["rest_seconds"], unit="초", accent=REST_COLOR,
         )
         self.rest_dial.grid(row=0, column=1, padx=14)
 
         self.rounds_dial = Dial(
-            settings, "라운드", minimum=1, maximum=60, value=5, unit="회", accent=FG
+            settings, "라운드", minimum=1, maximum=60,
+            value=self.saved_settings["rounds"], unit="회", accent=FG,
         )
         self.rounds_dial.grid(row=0, column=2, padx=14)
 
@@ -240,7 +300,7 @@ class BulgarianBagTimer(tk.Tk):
         self.rest_dial.on_change = lambda _v: self._on_settings_changed()
         self.rounds_dial.on_change = lambda _v: self._on_settings_changed()
 
-        self.skip_last_rest_var = tk.BooleanVar(value=True)
+        self.skip_last_rest_var = tk.BooleanVar(value=self.saved_settings["skip_last_rest"])
         skip_check = tk.Checkbutton(
             root,
             text="마지막 휴식 생략",
@@ -273,6 +333,7 @@ class BulgarianBagTimer(tk.Tk):
             self._draw_ring()
         else:
             self._update_progress_label()
+        self._schedule_save()
 
     def _total_planned_seconds(self):
         rounds = self.rounds_dial.value
