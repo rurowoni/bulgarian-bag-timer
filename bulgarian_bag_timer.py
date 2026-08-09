@@ -462,7 +462,7 @@ class BulgarianBagTimer(tk.Tk):
                 self._start_round(1, self.STATE_WORK)
             self.running = True
             self.start_btn.set_text("일시정지")
-            self._tick()
+            self.timer_job = self.after(1000, self._tick)
         else:
             self.running = False
             self._cancel_job()
@@ -518,7 +518,7 @@ class BulgarianBagTimer(tk.Tk):
             return
         self.remaining -= 1
         self.total_elapsed += 1
-        if self.remaining < 0:
+        if self.remaining <= 0:
             self._advance()
         else:
             self._draw_ring()
