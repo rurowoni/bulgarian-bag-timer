@@ -25,8 +25,7 @@ CANVAS_SIZE = 300
 RING_WIDTH = 14
 
 FLASH_FRAMES = 6
-FLASH_FRAME_MS = 55
-FLASH_HOLD_MS = 150
+FLASH_FRAME_MS = 45
 
 
 def play_sound(path: str) -> None:
@@ -77,7 +76,7 @@ class Dial(tk.Frame):
     """A rotary dial control: drag around the ring (or scroll) to set a value."""
 
     def __init__(self, parent, caption, minimum, maximum, value, unit, accent, diameter=112):
-        super().__init__(parent, bg=PANEL)
+        super().__init__(parent, bg=BG)
         self.minimum = minimum
         self.maximum = maximum
         self.value = value
@@ -87,11 +86,11 @@ class Dial(tk.Frame):
         self.enabled = True
         self.on_change = None
 
-        cap = tk.Label(self, text=caption, bg=PANEL, fg=MUTED, font=("Helvetica Neue", 12))
+        cap = tk.Label(self, text=caption, bg=BG, fg=MUTED, font=("Helvetica Neue", 12))
         cap.pack(pady=(2, 6))
 
         self.canvas = tk.Canvas(
-            self, width=diameter, height=diameter, bg=PANEL, highlightthickness=0
+            self, width=diameter, height=diameter, bg=BG, highlightthickness=0
         )
         self.canvas.pack(pady=(0, 4))
         self.canvas.bind("<Button-1>", self._on_drag)
@@ -122,7 +121,7 @@ class Dial(tk.Frame):
         r = (self.diameter - 2 * pad) / 2
         angle = math.radians(90 - 360 * fraction)
         hx, hy = cx + r * math.cos(angle), cy - r * math.sin(angle)
-        self.canvas.create_oval(hx - 7, hy - 7, hx + 7, hy + 7, fill=color, outline=PANEL, width=2)
+        self.canvas.create_oval(hx - 7, hy - 7, hx + 7, hy + 7, fill=color, outline=BG, width=2)
 
         text_color = FG if self.enabled else MUTED
         self.canvas.create_text(
@@ -185,8 +184,10 @@ class BulgarianBagTimer(tk.Tk):
         self.current_round = 0
         self.remaining = 0
         self.phase_total = 0
+        self.total_elapsed = 0
         self.running = False
         self.timer_job = None
+        self.flash_job = None
 
         self._build_ui()
         self._reset_all()
@@ -200,7 +201,12 @@ class BulgarianBagTimer(tk.Tk):
         self.state_label = tk.Label(
             root, text="준비", bg=BG, fg=FG, font=("Helvetica Neue", 22, "bold")
         )
-        self.state_label.pack(pady=(4, 16))
+        self.state_label.pack(pady=(4, 2))
+
+        self.progress_label = tk.Label(
+            root, text="00:00 / 00:00", bg=BG, fg=MUTED, font=("Helvetica Neue", 13)
+        )
+        self.progress_label.pack(pady=(0, 14))
 
         self.canvas = tk.Canvas(
             root, width=CANVAS_SIZE, height=CANVAS_SIZE, bg=BG, highlightthickness=0
@@ -216,17 +222,17 @@ class BulgarianBagTimer(tk.Tk):
         self.work_dial = Dial(
             settings, "운동", minimum=0, maximum=60, value=30, unit="초", accent=WORK_COLOR
         )
-        self.work_dial.grid(row=0, column=0, padx=8, ipadx=6, ipady=6)
+        self.work_dial.grid(row=0, column=0, padx=14)
 
         self.rest_dial = Dial(
             settings, "휴식", minimum=0, maximum=60, value=15, unit="초", accent=REST_COLOR
         )
-        self.rest_dial.grid(row=0, column=1, padx=8, ipadx=6, ipady=6)
+        self.rest_dial.grid(row=0, column=1, padx=14)
 
         self.rounds_dial = Dial(
             settings, "라운드", minimum=1, maximum=60, value=5, unit="회", accent=FG
         )
-        self.rounds_dial.grid(row=0, column=2, padx=8, ipadx=6, ipady=6)
+        self.rounds_dial.grid(row=0, column=2, padx=14)
 
         self.work_dial.on_change = lambda _v: self._on_settings_changed()
         self.rest_dial.on_change = lambda _v: self._on_settings_changed()
@@ -237,6 +243,7 @@ class BulgarianBagTimer(tk.Tk):
             root,
             text="마지막 휴식 생략",
             variable=self.skip_last_rest_var,
+            command=self._on_settings_changed,
             bg=BG,
             fg=MUTED,
             selectcolor=PANEL,
@@ -262,6 +269,20 @@ class BulgarianBagTimer(tk.Tk):
             self.phase_total = self.work_dial.value or 1
             self.remaining = self.phase_total
             self._draw_ring()
+        else:
+            self._update_progress_label()
+
+    def _total_planned_seconds(self):
+        rounds = self.rounds_dial.value
+        work_rounds_seconds = rounds * self.work_dial.value
+        rest_rounds = rounds - 1 if self.skip_last_rest_var.get() else rounds
+        rest_rounds = max(0, rest_rounds)
+        return work_rounds_seconds + rest_rounds * self.rest_dial.value
+
+    def _update_progress_label(self):
+        self.progress_label.configure(
+            text=f"{fmt_time(self.total_elapsed)} / {fmt_time(self._total_planned_seconds())}"
+        )
 
     # ---------- round dots ----------
 
@@ -362,40 +383,46 @@ class BulgarianBagTimer(tk.Tk):
             fg=self._color_for_phase() if self.phase != self.STATE_IDLE else FG,
         )
         self._render_round_dots()
+        self._update_progress_label()
 
     # ---------- completion flash animation ----------
+    # Purely cosmetic overlay drawn on top of the already-advanced ring.
+    # It never delays or reschedules the tick loop, so it cannot push the
+    # actual work/rest timing off schedule.
 
-    def _draw_flash_frame(self, frame, total):
-        self.canvas.delete("all")
-        pad = RING_WIDTH
-        x0, y0, x1, y1 = pad, pad, CANVAS_SIZE - pad, CANVAS_SIZE - pad
-        self.canvas.create_oval(x0, y0, x1, y1, outline=RING_TRACK, width=RING_WIDTH)
+    def _cancel_flash(self):
+        if self.flash_job is not None:
+            self.after_cancel(self.flash_job)
+            self.flash_job = None
+        self.canvas.delete("flash")
 
+    def _draw_flash_overlay(self, frame, total):
+        self.canvas.delete("flash")
         center = CANVAS_SIZE / 2
-        max_r = CANVAS_SIZE / 2 - pad / 2
-        fraction = (frame + 1) / total
+        max_r = CANVAS_SIZE / 2 - RING_WIDTH / 2
+        fraction = 1 - frame / (total - 1)
         r = max_r * fraction
+        if r <= 0:
+            return
         self.canvas.create_oval(
-            center - r, center - r, center + r, center + r, fill="white", outline=""
+            center - r, center - r, center + r, center + r,
+            fill="white", outline="", tags="flash",
         )
-        if fraction >= 0.45:
+        if fraction >= 0.4:
             self.canvas.create_text(
-                center, center, text="00:00", fill="black", font=("Helvetica Neue", 48, "bold")
+                center, center, text="00:00", fill="black",
+                font=("Helvetica Neue", 48, "bold"), tags="flash",
             )
 
     def _play_completion_flash(self, frame=0):
-        self._draw_flash_frame(frame, FLASH_FRAMES)
+        self._draw_flash_overlay(frame, FLASH_FRAMES)
         if frame + 1 < FLASH_FRAMES:
-            self.timer_job = self.after(
+            self.flash_job = self.after(
                 FLASH_FRAME_MS, lambda: self._play_completion_flash(frame + 1)
             )
         else:
-            self.timer_job = self.after(FLASH_HOLD_MS, self._finish_flash)
-
-    def _finish_flash(self):
-        self._advance()
-        if self.running:
-            self.timer_job = self.after(1000, self._tick)
+            self.flash_job = None
+            self.canvas.delete("flash")
 
     # ---------- state machine ----------
 
@@ -406,11 +433,13 @@ class BulgarianBagTimer(tk.Tk):
 
     def _reset_all(self):
         self._cancel_job()
+        self._cancel_flash()
         self.running = False
         self.phase = self.STATE_IDLE
         self.current_round = 0
         self.phase_total = self.work_dial.value or 1
         self.remaining = self.phase_total
+        self.total_elapsed = 0
         self._set_inputs_enabled(True)
         self.start_btn.set_text("시작")
         self._draw_ring()
@@ -479,10 +508,12 @@ class BulgarianBagTimer(tk.Tk):
         if not self.running:
             return
         self.remaining -= 1
+        self.total_elapsed += 1
         if self.remaining < 0:
+            self._advance()
             self._play_completion_flash()
-            return
-        self._draw_ring()
+        else:
+            self._draw_ring()
         if self.running:
             self.timer_job = self.after(1000, self._tick)
 
