@@ -110,7 +110,9 @@ class Dial(tk.Frame):
         fraction = (self.value - self.minimum) / span if span else 0
         color = self.accent if self.enabled else MUTED
 
-        if fraction > 0:
+        if fraction >= 0.999:
+            self.canvas.create_oval(x0, y0, x1, y1, outline=color, width=8)
+        elif fraction > 0:
             self.canvas.create_arc(
                 x0, y0, x1, y1,
                 start=90, extent=-360 * fraction,
@@ -354,16 +356,21 @@ class BulgarianBagTimer(tk.Tk):
         else:
             fraction = 0 if self.phase == self.STATE_IDLE else 1
         fraction = max(0.0, min(1.0, fraction))
-        extent = -360 * fraction
 
-        if fraction > 0:
+        if fraction >= 0.999:
+            # Tk's create_arc silently draws nothing for a full 360° sweep
+            # (start == end point), so a full ring needs a plain circle.
+            self.canvas.create_oval(
+                x0, y0, x1, y1, outline=self._color_for_phase(), width=RING_WIDTH
+            )
+        elif fraction > 0:
             self.canvas.create_arc(
                 x0,
                 y0,
                 x1,
                 y1,
                 start=90,
-                extent=extent,
+                extent=-360 * fraction,
                 style="arc",
                 outline=self._color_for_phase(),
                 width=RING_WIDTH,
@@ -476,6 +483,7 @@ class BulgarianBagTimer(tk.Tk):
         self.remaining = self.phase_total
         play_sound(SOUND_TRANSITION)
         self._draw_ring()
+        self._play_completion_flash()
 
     def _advance(self):
         total_rounds = self.rounds_dial.value
@@ -503,6 +511,7 @@ class BulgarianBagTimer(tk.Tk):
         self._set_inputs_enabled(True)
         self.start_btn.set_text("다시 시작")
         self._draw_ring()
+        self._play_completion_flash()
 
     def _tick(self):
         if not self.running:
@@ -511,7 +520,6 @@ class BulgarianBagTimer(tk.Tk):
         self.total_elapsed += 1
         if self.remaining < 0:
             self._advance()
-            self._play_completion_flash()
         else:
             self._draw_ring()
         if self.running:
